@@ -1,10 +1,13 @@
+#![allow(warnings)]
 use std::{
     io::{stderr, BufRead},
     ops::Range,
     process::{Command, Output},
+    usize,
 };
 
 use gpui::*;
+use shrs::prelude::Stylize;
 use unicode_segmentation::*;
 
 actions!(
@@ -32,15 +35,18 @@ actions!(
 );
 
 // TODO : Colouring!
+#[derive(Clone)]
 struct Operation {
     stdin: String,
     stdout: String,
     stderr: String,
+    time: f32,
+    dir: String,
 }
 
 impl Operation {
     fn is_err(&self) -> bool {
-        self.stderr.len() > 1
+        !self.stderr.is_empty()
     }
 }
 
@@ -55,6 +61,7 @@ struct TextInput {
     last_bounds: Option<Bounds<Pixels>>,
     is_selecting: bool,
     operations: Vec<Operation>,
+    operation_index: usize,
 }
 
 impl TextInput {
@@ -74,9 +81,41 @@ impl TextInput {
         }
     }
 
-    fn up(&mut self, _: &Up, _: &mut Window, cx: &mut Context<Self>) {}
+    fn up(&mut self, _: &Up, window: &mut Window, cx: &mut Context<Self>) {
+        if self.operations.is_empty() {
+            return;
+        }
 
-    fn down(&mut self, _: &Down, _: &mut Window, cx: &mut Context<Self>) {}
+        if self.operation_index >= self.operations.len() {
+            self.operation_index = self.operations.len() - 1;
+        }
+
+        let operation: Operation = self.operations[self.operation_index].clone();
+
+        self.reset();
+        self.replace_text_in_range(None, &operation.stdin, window, cx);
+
+        self.operation_index += 1;
+    }
+
+    fn down(&mut self, _: &Down, window: &mut Window, cx: &mut Context<Self>) {
+        if self.operations.is_empty() {
+            return;
+        }
+
+        if self.operation_index < 0 {
+            self.operation_index = 0;
+        } else if self.operation_index >= self.operations.len() {
+            self.operation_index = self.operations.len() - 1;
+        } else if self.operation_index > 0 {
+            self.operation_index -= 1;
+        }
+
+        self.reset();
+
+        let operation: Operation = self.operations[self.operation_index].clone();
+        self.replace_text_in_range(None, &operation.stdin, window, cx);
+    }
 
     fn select_left(&mut self, _: &SelectLeft, _: &mut Window, cx: &mut Context<Self>) {
         self.select_to(self.previous_boundary(self.cursor_offset()), cx);
@@ -126,42 +165,85 @@ impl TextInput {
     }
 
     fn enter(&mut self, _: &Enter, window: &mut Window, cx: &mut Context<Self>) {
-        let stdin = self.content.to_string();
+        // self.content.underline_white()
+        let stdin = self.content.trim().to_string();
         self.reset();
+        if stdin.is_empty() {
+            return;
+        }
 
         // TODO : Put this somewhere smarter
-        let v: Vec<&str> = stdin.split(' ').collect();
+        let v: Vec<&str> = stdin.split_whitespace().collect();
 
         let output: std::io::Result<Output>;
-        if v.len() == 1 {
-            output = Command::new(v[0]).output();
-        } else {
-            output = Command::new(v[0]).args(&v[1..]).output();
+        let mut command = Command::new(v[0]);
+        if self.operations.len() > 0 {
+            let last = self.operations.last();
+            if last.is_some() {
+                let last_op = last.unwrap();
+                command.current_dir(last_op.dir.clone());
+            }
         }
+        if v.len() != 1 {
+            command.args(&v[1..]);
+        }
+
+        let mut command = Command::new("cd");
+        print!(command.get_current_dir());
+        
+        command.arg("target");
+        let output = command.output();
+
+        output = command.output();
 
         let mut stdout = "".to_owned();
         let mut stderr = "".to_owned();
+
+        let now = std::time::SystemTime::now();
 
         if output.is_err() {
             let err = output.unwrap_err();
             stderr = err.to_string();
         } else {
             let unwrapped = output.unwrap();
+
             if unwrapped.status.success() {
+                let mut string_list: Vec<String> = vec![];
                 for line in unwrapped.stdout.lines() {
-                    stdout = format!("{}{}\n", stdout, line.unwrap());
+                    string_list.push(format!("{}{}", stdout, line.unwrap()));
                 }
+                stdout = string_list.join("\n");
             } else {
-                for line in unwrapped.stderr.lines() {
-                    stderr = format!("{}{}\n", stderr, line.unwrap());
+                let mut string_list: Vec<String> = vec![];
+                for line in unwrapped.stdout.lines() {
+                    string_list.push(format!("{}{}", stderr, line.unwrap()));
                 }
+                stderr = string_list.join("\n");
             }
         }
+
+        let diff = now.elapsed().unwrap();
+        let utime = diff.as_nanos() / 1000u128;
+        let time = utime as f32;
+
+        let cdir = command.get_current_dir();
+        let mut str: String = (*".").to_string();
+        if cdir.is_some() {
+            let cdir_str = cdir.unwrap().to_str();
+            if cdir_str.is_some() {
+                str = (*cdir_str.unwrap()).to_string();
+            }
+        }
+
+        let cdirrr = std::env::current_dir();
+        let pb = Some(cdirr);
 
         let op = Operation {
             stdin,
             stdout,
             stderr,
+            time,
+            dir: str,
         };
 
         let mut ops = Vec::from([op]);
@@ -216,7 +298,7 @@ impl TextInput {
             ));
         }
     }
-    fn cut(&mut self, _: &Copy, window: &mut Window, cx: &mut Context<Self>) {
+    fn cut(&mut self, _: &Cut, window: &mut Window, cx: &mut Context<Self>) {
         if !self.selected_range.is_empty() {
             cx.write_to_clipboard(ClipboardItem::new_string(
                 (&self.content[self.selected_range.clone()]).to_string(),
@@ -440,6 +522,15 @@ impl EntityInputHandler for TextInput {
             ),
         ))
     }
+
+    fn character_index_for_point(
+        &mut self,
+        point: gpui::Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<usize> {
+        todo!()
+    }
 }
 
 struct TextElement {
@@ -505,7 +596,7 @@ impl Element for TextElement {
 
         let run = TextRun {
             len: display_text.len(),
-            font: style.font(),
+            font: font("courier-new"),
             color: gpui::Hsla::white(),
             background_color: None,
             underline: None,
@@ -553,7 +644,7 @@ impl Element for TextElement {
                         point(bounds.left() + cursor_pos, bounds.top()),
                         size(px(2.), bounds.bottom() - bounds.top()),
                     ),
-                    rgb(0xfcc419),
+                    rgb(0x4dabf7),
                 )),
             )
         } else {
@@ -645,15 +736,19 @@ impl Render for TextInput {
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
-            .bg(rgb(0x212529))
+            // .bg(rgb(0x212529)) // No Need
             .line_height(px(30.))
             .text_size(px(24.))
             .child(
                 div()
+                    .flex()
+                    .flex_row()
                     .h(px(30. + 4. * 2.))
                     .w_full()
                     .p(px(4.))
                     .bg(rgb(0x212529))
+                    .child(div().w(px(38.)).child("ys").text_color(rgb(0xfab005)))
+                    .child(div().w(px(22.)).child("~").text_color(rgb(0xfab005)))
                     .child(TextElement {
                         input: cx.entity().clone(),
                     }),
@@ -700,11 +795,33 @@ impl Render for InputExample {
             .child(self.text_input.clone())
             .text_color(white())
             .children(self.text_input.read(cx).operations.iter().rev().map(|op| {
-                if op.is_err() {
-                    format!("{}", op.stderr)
-                } else {
-                    format!("{}", op.stdout)
-                }
+                div()
+                    // .child(ui::Divider::horizontal())
+                    .child(
+                        div()
+                            .child(format!("*ys ~ ({} ms)", op.time))
+                            .text_color(rgb(0x0b7285))
+                            .text_sm(),
+                    )
+                    .child(
+                        div()
+                            .child(format!("{}", op.stdin))
+                            .text_color(if op.is_err() {
+                                red().to_rgb()
+                            } else {
+                                rgb(0xced4da)
+                            })
+                            .font_weight(FontWeight::BLACK),
+                    )
+                    .child(if op.is_err() {
+                        div()
+                            .child(format!("ERR : {}", op.stderr))
+                            .text_color(rgb(0xf03e3e))
+                    } else {
+                        div()
+                            .child(format!("{}", op.stdout))
+                            .text_color(rgb(0x868e96))
+                    })
             }))
     }
 }
@@ -727,6 +844,8 @@ fn main() {
             KeyBinding::new("cmd-v", Paste, None),
             KeyBinding::new("cmd-c", Copy, None),
             KeyBinding::new("cmd-x", Cut, None),
+            KeyBinding::new("up", Up, None),
+            KeyBinding::new("down", Down, None),
             KeyBinding::new("home", Home, None),
             KeyBinding::new("end", End, None),
             KeyBinding::new("shift-home", ShiftHome, None),
@@ -744,7 +863,7 @@ fn main() {
                     let text_input = cx.new(|cx| TextInput {
                         focus_handle: cx.focus_handle(),
                         content: "".into(),
-                        placeholder: "...".into(),
+                        placeholder: "".into(),
                         selected_range: 0..0,
                         selection_reversed: false,
                         marked_range: None,
@@ -752,6 +871,7 @@ fn main() {
                         last_bounds: None,
                         is_selecting: false,
                         operations: vec![],
+                        operation_index: 0,
                     });
                     cx.new(|cx| InputExample {
                         text_input,
